@@ -140,6 +140,10 @@ impl Key {
     pub fn len(&self) -> usize {
         self.0.len()
     }
+
+    pub fn key(&self) -> &Vec<u8> {
+        &self.0
+    }
 }
 
 impl From<Vec<u8>> for Key {
