@@ -1,6 +1,6 @@
 [package]
-name = "surrealdb-tikv-client"
-version = "0.3.0-surreal.1"
+name = "tikv-client"
+version = "0.3.0"
 keywords = ["TiKV", "KV", "distributed-systems"]
 license = "Apache-2.0"
 authors = ["The TiKV Project Authors"]
@@ -25,7 +25,7 @@ members = [
 ]
 
 [dependencies]
-async-recursion = "0.3"
+async-recursion = "1.1.1"
 async-trait = "0.1"
 derive-new = "0.5"
 either = "1.6"
@@ -45,7 +45,7 @@ serde_json = "1"
 take_mut = "0.2.2"
 thiserror = "1"
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros"] }
-tonic = { version = "0.10", features = ["tls"] }
+tonic = { version = "0.11", features = ["tls"] }
 
 [dev-dependencies]
 clap = "2"

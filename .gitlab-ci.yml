@@ -1,0 +1,11 @@
+include:
+  - project: 'eos/devops/gitlab-cicd-template'
+    ref: cmain
+    file:
+      - 'common/global.yml'
+      - 'common/lint/commit-check.yml'
+      - 'common/lint/markdown-check.yml'
+
+stages:
+  - commit-check
+  - markdown-check
