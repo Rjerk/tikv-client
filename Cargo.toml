@@ -1,5 +1,5 @@
 [package]
-name = "tikv-client"
+name = "surrealdb-tikv-client"
 version = "0.3.0"
 keywords = ["TiKV", "KV", "distributed-systems"]
 license = "Apache-2.0"

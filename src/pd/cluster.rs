@@ -6,6 +6,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use log::debug;
 use log::error;
 use log::info;
 use log::warn;
@@ -48,6 +49,7 @@ impl Cluster {
         key: Vec<u8>,
         timeout: Duration,
     ) -> Result<pdpb::GetRegionResponse> {
+        debug!("Cluster - Sending get_region: {:?}", key);
         let mut req = pd_request!(self.id, pdpb::GetRegionRequest);
         req.region_key = key;
         req.send(&mut self.client, timeout).await
@@ -58,6 +60,7 @@ impl Cluster {
         id: u64,
         timeout: Duration,
     ) -> Result<pdpb::GetRegionResponse> {
+        debug!("Cluster - Sending get_region_by_id: {}", id);
         let mut req = pd_request!(self.id, pdpb::GetRegionByIdRequest);
         req.region_id = id;
         req.send(&mut self.client, timeout).await
@@ -68,6 +71,7 @@ impl Cluster {
         id: u64,
         timeout: Duration,
     ) -> Result<pdpb::GetStoreResponse> {
+        debug!("Cluster - Sending get_store: {}", id);
         let mut req = pd_request!(self.id, pdpb::GetStoreRequest);
         req.store_id = id;
         req.send(&mut self.client, timeout).await
@@ -77,11 +81,13 @@ impl Cluster {
         &mut self,
         timeout: Duration,
     ) -> Result<pdpb::GetAllStoresResponse> {
+        debug!("Cluster - Sending get_all_stores");
         let req = pd_request!(self.id, pdpb::GetAllStoresRequest);
         req.send(&mut self.client, timeout).await
     }
 
     pub async fn get_timestamp(&self) -> Result<Timestamp> {
+        debug!("Cluster - Sending get_timestamp");
         self.tso.clone().get_timestamp().await
     }
 
@@ -90,6 +96,7 @@ impl Cluster {
         safepoint: u64,
         timeout: Duration,
     ) -> Result<pdpb::UpdateGcSafePointResponse> {
+        debug!("Cluster - Sending update_safepoint");
         let mut req = pd_request!(self.id, pdpb::UpdateGcSafePointRequest);
         req.safe_point = safepoint;
         req.send(&mut self.client, timeout).await
@@ -100,6 +107,7 @@ impl Cluster {
         keyspace: &str,
         timeout: Duration,
     ) -> Result<keyspacepb::KeyspaceMeta> {
+        debug!("Cluster - Sending load_keyspace");
         let mut req = pd_request!(self.id, keyspacepb::LoadKeyspaceRequest);
         req.name = keyspace.to_string();
         let resp = req.send(&mut self.keyspace_client, timeout).await?;
@@ -125,6 +133,7 @@ impl Connection {
         endpoints: &[String],
         timeout: Duration,
     ) -> Result<Cluster> {
+        debug!("Connection - connect_cluster {:?}", endpoints);
         let members = self.validate_endpoints(endpoints, timeout).await?;
         let (client, keyspace_client, members) = self.try_connect_leader(&members, timeout).await?;
         let id = members.header.as_ref().unwrap().cluster_id;
@@ -141,7 +150,7 @@ impl Connection {
 
     // Re-establish connection with PD leader in asynchronous fashion.
     pub async fn reconnect(&self, cluster: &mut Cluster, timeout: Duration) -> Result<()> {
-        warn!("updating pd client");
+        debug!("Connection - reconnect");
         let start = Instant::now();
         let (client, keyspace_client, members) =
             self.try_connect_leader(&cluster.members, timeout).await?;
@@ -154,7 +163,10 @@ impl Connection {
             tso,
         };
 
-        info!("updating PD client done, spent {:?}", start.elapsed());
+        info!(
+            "Connection - PD client reconnect done, spent {:?}",
+            start.elapsed()
+        );
         Ok(())
     }
 
@@ -163,6 +175,8 @@ impl Connection {
         endpoints: &[String],
         timeout: Duration,
     ) -> Result<pdpb::GetMembersResponse> {
+        debug!("Connection - validate_endpoints {:?}", endpoints);
+
         let mut endpoints_set = HashSet::with_capacity(endpoints.len());
 
         let mut members = None;
@@ -219,6 +233,8 @@ impl Connection {
         keyspacepb::keyspace_client::KeyspaceClient<Channel>,
         pdpb::GetMembersResponse,
     )> {
+        debug!("Connection - connect {}", addr);
+
         let mut client = self
             .security_mgr
             .connect(addr, pdpb::pd_client::PdClient::<Channel>::new)
@@ -260,6 +276,11 @@ impl Connection {
         keyspacepb::keyspace_client::KeyspaceClient<Channel>,
         pdpb::GetMembersResponse,
     )> {
+        debug!(
+            "Connection - try_connect {} and cluster {}",
+            addr, cluster_id
+        );
+
         let (client, keyspace_client, r) = self.connect(addr, timeout).await?;
         Connection::validate_cluster_id(addr, &r, cluster_id)?;
         Ok((client, keyspace_client, r))
@@ -270,6 +291,11 @@ impl Connection {
         members: &pdpb::GetMembersResponse,
         cluster_id: u64,
     ) -> Result<()> {
+        debug!(
+            "Connection - validate_cluster_id {} in members {:?} with old cluster id {}",
+            addr, members, cluster_id
+        );
+
         let new_cluster_id = members.header.as_ref().unwrap().cluster_id;
         if new_cluster_id != cluster_id {
             Err(internal_err!(
@@ -292,6 +318,10 @@ impl Connection {
         keyspacepb::keyspace_client::KeyspaceClient<Channel>,
         pdpb::GetMembersResponse,
     )> {
+        debug!(
+            "Connection: try_connect_leader with previous: {:?}",
+            previous
+        );
         let previous_leader = previous.leader.as_ref().unwrap();
         let members = &previous.members;
         let cluster_id = previous.header.as_ref().unwrap().cluster_id;
@@ -310,7 +340,7 @@ impl Connection {
                         break 'outer;
                     }
                     Err(e) => {
-                        error!("failed to connect to {}, {:?}", ep, e);
+                        error!("failed to connect to {}, {}", ep, e);
                         continue;
                     }
                 }

@@ -64,7 +64,7 @@ impl TimestampOracle {
     }
 
     pub(crate) async fn get_timestamp(self) -> Result<Timestamp> {
-        debug!("getting current timestamp");
+        debug!("TimestampOracle - sending TimestampRequest");
         let (request, response) = oneshot::channel();
         self.request_tx
             .send(request)
@@ -79,6 +79,7 @@ async fn run_tso(
     mut pd_client: PdClient<Channel>,
     request_rx: mpsc::Receiver<TimestampRequest>,
 ) -> Result<()> {
+    debug!("TSO start running");
     // The `TimestampRequest`s which are waiting for the responses from the PD server
     let pending_requests = Arc::new(Mutex::new(VecDeque::with_capacity(MAX_PENDING_COUNT)));
 

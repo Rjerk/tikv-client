@@ -1353,6 +1353,12 @@ impl<PdC: PdClient> Committer<PdC> {
             .plan();
         let response = plan.execute().await?;
 
+        if response.len() == 0 {
+            return Err(Error::InternalError {
+                message: "Prewrite response is None".to_owned(),
+            });
+        }
+
         if self.options.try_one_pc && response.len() == 1 {
             if response[0].one_pc_commit_ts == 0 {
                 return Err(Error::OnePcFailure);

@@ -8,6 +8,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use log::debug;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 
@@ -153,6 +154,7 @@ impl RetryClientTrait for RetryClient<Cluster> {
                     .get_region(key.clone(), self.timeout)
                     .await
                     .and_then(|resp| {
+                        debug!("RetryClient::get_region - response: {:?}", resp);
                         region_from_response(resp, || Error::RegionForKeyNotFound { key })
                     })
             }
@@ -165,6 +167,7 @@ impl RetryClientTrait for RetryClient<Cluster> {
                 .get_region_by_id(region_id, self.timeout)
                 .await
                 .and_then(|resp| {
+                    debug!("RetryClient::get_region_by_id - response: {:?}", resp);
                     region_from_response(resp, || Error::RegionNotFoundInResponse { region_id })
                 })
         })
@@ -223,6 +226,15 @@ fn region_from_response(
     let region = resp.region.take().ok_or_else(err)?;
     Ok(RegionWithLeader::new(region, resp.leader.take()))
 }
+
+// fn new_region(
+//     mut resp: pdpb::GetRegionResponse,
+//     err: impl FnOnce() -> Error,
+// ) -> Result<crate::region::Region> {
+//     let region = resp.region.take().ok_or_else(err)?;
+//     let r = crate::region::Region { meta: region };
+//     Ok()
+// }
 
 // A node-like thing that can be connected to.
 #[async_trait]

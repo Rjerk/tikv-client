@@ -11,6 +11,7 @@ use std::sync::Arc;
 use derive_new::new;
 use futures::prelude::*;
 use futures::stream::BoxStream;
+use log::debug;
 
 pub use self::client::KvClient;
 pub use self::client::KvConnect;
@@ -47,6 +48,7 @@ where
     K: AsRef<Key> + Into<KOut> + Send + Sync + 'static,
     KOut: Send + Sync + 'static,
 {
+    debug!("store_stream_for_keys");
     pd_client
         .clone()
         .group_keys_by_region(key_data)
@@ -64,6 +66,7 @@ pub fn store_stream_for_range<PdC: PdClient>(
     range: (Vec<u8>, Vec<u8>),
     pd_client: Arc<PdC>,
 ) -> BoxStream<'static, Result<((Vec<u8>, Vec<u8>), RegionStore)>> {
+    debug!("store_stream_for_range");
     let bnd_range = if range.1.is_empty() {
         BoundRange::range_from(range.0.clone().into())
     } else {
@@ -99,6 +102,7 @@ pub fn store_stream_for_ranges<PdC: PdClient>(
     ranges: Vec<kvrpcpb::KeyRange>,
     pd_client: Arc<PdC>,
 ) -> BoxStream<'static, Result<(Vec<kvrpcpb::KeyRange>, RegionStore)>> {
+    debug!("store_stream_for_ranges");
     pd_client
         .clone()
         .group_ranges_by_region(ranges)

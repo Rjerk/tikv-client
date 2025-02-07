@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use log::debug;
 use tokio::sync::Notify;
 use tokio::sync::RwLock;
 
@@ -51,9 +52,59 @@ impl RegionCacheMap {
     }
 }
 
+pub struct StoreCache<Client = RetryClient<Cluster>> {
+    pd_client: Arc<Client>,
+
+    store_mut: RwLock<HashMap<StoreId, Store>>,
+}
+
+impl<Client> StoreCache<Client> {
+    pub fn new(pd_client: Arc<Client>) -> StoreCache<Client> {
+        StoreCache {
+            pd_client: pd_client.clone(),
+            store_mut: RwLock::new(HashMap::new()),
+        }
+    }
+}
+
+impl<C: RetryClientTrait> StoreCache<C> {
+    pub async fn get_store_by_id(&self, id: StoreId) -> Result<Store> {
+        debug!("StoreCache::get_store_by_id - id: {:?}", id);
+        let store = self.store_mut.read().await.get(&id).cloned();
+        match store {
+            Some(store) => Ok(store),
+            None => self.fetch_store(id).await,
+        }
+    }
+
+    pub async fn fetch_store(&self, id: StoreId) -> Result<Store> {
+        debug!("StoreCache::fetch_store - id: {}", id);
+        let store = self.pd_client.clone().get_store(id).await?;
+        self.store_mut.write().await.insert(id, store.clone());
+        Ok(store)
+    }
+
+    pub async fn fetch_all_stores(&self) -> Result<Vec<Store>> {
+        debug!("StoreCache::fetch_all_store");
+        let stores = self
+            .pd_client
+            .clone()
+            .get_all_stores()
+            .await?
+            .into_iter()
+            .filter(is_valid_tikv_store)
+            .collect::<Vec<_>>();
+        for store in &stores {
+            self.store_mut.write().await.insert(store.id, store.clone());
+        }
+        Ok(stores)
+    }
+}
+
+/// RegionCache caches Regions loaded from PD.
 pub struct RegionCache<Client = RetryClient<Cluster>> {
     region_cache: RwLock<RegionCacheMap>,
-    store_cache: RwLock<HashMap<StoreId, Store>>,
+    store_cache: StoreCache<Client>,
     inner_client: Arc<Client>,
 }
 
@@ -61,8 +112,8 @@ impl<Client> RegionCache<Client> {
     pub fn new(inner_client: Arc<Client>) -> RegionCache<Client> {
         RegionCache {
             region_cache: RwLock::new(RegionCacheMap::new()),
-            store_cache: RwLock::new(HashMap::new()),
-            inner_client,
+            store_cache: StoreCache::new(inner_client.clone()),
+            inner_client: inner_client.clone(),
         }
     }
 }
@@ -70,6 +121,7 @@ impl<Client> RegionCache<Client> {
 impl<C: RetryClientTrait> RegionCache<C> {
     // Retrieve cache entry by key. If there's no entry, query PD and update cache.
     pub async fn get_region_by_key(&self, key: &Key) -> Result<RegionWithLeader> {
+        debug!("RegionCache::get_region_by_key - key: {:?}", key);
         let region_cache_guard = self.region_cache.read().await;
         let res = {
             region_cache_guard
@@ -86,15 +138,21 @@ impl<C: RetryClientTrait> RegionCache<C> {
                 .unwrap();
 
             if region.contains(key) {
+                debug!(
+                    "RegionCache::get_region_by_key - read region from cache: {:?}",
+                    region
+                );
                 return Ok(region.clone());
             }
         }
         drop(region_cache_guard);
-        self.read_through_region_by_key(key.clone()).await
+        debug!("RegionCache::get_region_by_key - needs read through");
+        self.load_region(key.clone()).await
     }
 
     // Retrieve cache entry by RegionId. If there's no entry, query PD and update cache.
     pub async fn get_region_by_id(&self, id: RegionId) -> Result<RegionWithLeader> {
+        debug!("RegionCache::get_region_by_id - id: {:?}", id);
         for _ in 0..=MAX_RETRY_WAITING_CONCURRENT_REQUEST {
             let region_cache_guard = self.region_cache.read().await;
 
@@ -123,15 +181,16 @@ impl<C: RetryClientTrait> RegionCache<C> {
     }
 
     pub async fn get_store_by_id(&self, id: StoreId) -> Result<Store> {
-        let store = self.store_cache.read().await.get(&id).cloned();
-        match store {
-            Some(store) => Ok(store),
-            None => self.read_through_store_by_id(id).await,
-        }
+        self.store_cache.get_store_by_id(id).await
     }
 
-    /// Force read through (query from PD) and update cache
-    pub async fn read_through_region_by_key(&self, key: Key) -> Result<RegionWithLeader> {
+    pub async fn read_through_all_stores(&self) -> Result<Vec<Store>> {
+        self.store_cache.fetch_all_stores().await
+    }
+
+    /// Loads region from pd client, and update the region cache
+    pub async fn load_region(&self, key: Key) -> Result<RegionWithLeader> {
+        debug!("RegionCache::load_region - key: {:?}", key);
         let region = self.inner_client.clone().get_region(key.into()).await?;
         self.add_region(region.clone()).await;
         Ok(region)
@@ -139,6 +198,7 @@ impl<C: RetryClientTrait> RegionCache<C> {
 
     /// Force read through (query from PD) and update cache
     async fn read_through_region_by_id(&self, id: RegionId) -> Result<RegionWithLeader> {
+        debug!("RegionCache::read_through_region_by_id - id: {:?}", id);
         // put a notify to let others know the region id is being queried
         let notify = Arc::new(Notify::new());
         {
@@ -159,13 +219,9 @@ impl<C: RetryClientTrait> RegionCache<C> {
         Ok(region)
     }
 
-    async fn read_through_store_by_id(&self, id: StoreId) -> Result<Store> {
-        let store = self.inner_client.clone().get_store(id).await?;
-        self.store_cache.write().await.insert(id, store.clone());
-        Ok(store)
-    }
-
     pub async fn add_region(&self, region: RegionWithLeader) {
+        debug!("RegionCache::add_region - region: {:?}", region);
+
         // FIXME: will it be the performance bottleneck?
         let mut cache = self.region_cache.write().await;
 
@@ -212,6 +268,10 @@ impl<C: RetryClientTrait> RegionCache<C> {
         ver_id: crate::region::RegionVerId,
         leader: metapb::Peer,
     ) -> Result<()> {
+        debug!(
+            "RegionCache::update_leader - ver_id {:?}, leader {:?}",
+            ver_id, leader
+        );
         let mut cache = self.region_cache.write().await;
         let region_entry = cache.ver_id_to_region.get_mut(&ver_id);
         if let Some(region) = region_entry {
@@ -222,33 +282,20 @@ impl<C: RetryClientTrait> RegionCache<C> {
     }
 
     pub async fn invalidate_region_cache(&self, ver_id: crate::region::RegionVerId) {
+        debug!("RegionCache::invalidate_region_cache - {:?}", ver_id);
         let mut cache = self.region_cache.write().await;
         let region_entry = cache.ver_id_to_region.get(&ver_id);
         if let Some(region) = region_entry {
+            debug!(
+                "RegionCache::invalidate_region_cache: found entry {:?} -> {:?}",
+                ver_id, region
+            );
             let id = region.id();
             let start_key = region.start_key();
             cache.ver_id_to_region.remove(&ver_id);
             cache.id_to_ver_id.remove(&id);
             cache.key_to_ver_id.remove(&start_key);
         }
-    }
-
-    pub async fn read_through_all_stores(&self) -> Result<Vec<Store>> {
-        let stores = self
-            .inner_client
-            .clone()
-            .get_all_stores()
-            .await?
-            .into_iter()
-            .filter(is_valid_tikv_store)
-            .collect::<Vec<_>>();
-        for store in &stores {
-            self.store_cache
-                .write()
-                .await
-                .insert(store.id, store.clone());
-        }
-        Ok(stores)
     }
 }
 

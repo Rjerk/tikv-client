@@ -6,6 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::prelude::*;
 use futures::stream::BoxStream;
+use log::debug;
 use log::info;
 use tokio::sync::RwLock;
 
@@ -70,11 +71,13 @@ pub trait PdClient: Send + Sync + 'static {
 
     /// In transactional API, `key` is in raw format
     async fn store_for_key(self: Arc<Self>, key: &Key) -> Result<RegionStore> {
+        debug!("PdClient::store_for_key - {:?}", key);
         let region = self.region_for_key(key).await?;
         self.map_region_to_store(region).await
     }
 
     async fn store_for_id(self: Arc<Self>, id: RegionId) -> Result<RegionStore> {
+        debug!("PdClient::store_for_id - {:?}", id);
         let region = self.region_for_id(id).await?;
         self.map_region_to_store(region).await
     }
@@ -89,6 +92,7 @@ pub trait PdClient: Send + Sync + 'static {
         K: AsRef<Key> + Into<K2> + Send + Sync + 'static,
         K2: Send + Sync + 'static,
     {
+        debug!("PdClient::group_keys_by_region");
         let keys = keys.peekable();
         stream_fn(keys, move |mut keys| {
             let this = self.clone();
@@ -116,6 +120,7 @@ pub trait PdClient: Send + Sync + 'static {
         self: Arc<Self>,
         range: BoundRange,
     ) -> BoxStream<'static, Result<RegionStore>> {
+        debug!("PdClient::stores_for_range - {:?}", range);
         let (start_key, end_key) = range.into_keys();
         stream_fn(Some(start_key), move |start_key| {
             let end_key = end_key.clone();
@@ -147,6 +152,7 @@ pub trait PdClient: Send + Sync + 'static {
         self: Arc<Self>,
         mut ranges: Vec<kvrpcpb::KeyRange>,
     ) -> BoxStream<'static, Result<(RegionWithLeader, Vec<kvrpcpb::KeyRange>)>> {
+        debug!("PdClient::group_ranges_by_region - {:?}", ranges);
         ranges.reverse();
         stream_fn(Some(ranges), move |ranges| {
             let this = self.clone();
@@ -222,6 +228,7 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
     type KvClient = KvC::KvClient;
 
     async fn map_region_to_store(self: Arc<Self>, region: RegionWithLeader) -> Result<RegionStore> {
+        debug!("PdRpcClient::map_region_to_store: {:?}", region);
         let store_id = region.get_store_id()?;
         let store = self.region_cache.get_store_by_id(store_id).await?;
         let kv_client = self.kv_client(&store.address).await?;
@@ -235,17 +242,20 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
         } else {
             key.clone()
         };
+        debug!("PdRpcClient::region_for_key: {:?}", key);
 
         let region = self.region_cache.get_region_by_key(&key).await?;
         Self::decode_region(region, enable_codec)
     }
 
     async fn region_for_id(&self, id: RegionId) -> Result<RegionWithLeader> {
+        debug!("PdRpcClient::region_for_id: {:?}", id);
         let region = self.region_cache.get_region_by_id(id).await?;
         Self::decode_region(region, self.enable_codec)
     }
 
     async fn all_stores(&self) -> Result<Vec<Store>> {
+        debug!("PdRpcClient::all_stores");
         let pb_stores = self.region_cache.read_through_all_stores().await?;
         let mut stores = Vec::with_capacity(pb_stores.len());
         for store in pb_stores {
@@ -256,22 +266,30 @@ impl<KvC: KvConnect + Send + Sync + 'static> PdClient for PdRpcClient<KvC> {
     }
 
     async fn get_timestamp(self: Arc<Self>) -> Result<Timestamp> {
+        debug!("PdRpcClient::get_timestamp");
         self.pd.clone().get_timestamp().await
     }
 
     async fn update_safepoint(self: Arc<Self>, safepoint: u64) -> Result<bool> {
+        debug!("PdRpcClient::update_safepoint: {:?}", safepoint);
         self.pd.clone().update_safepoint(safepoint).await
     }
 
     async fn update_leader(&self, ver_id: RegionVerId, leader: metapb::Peer) -> Result<()> {
+        debug!(
+            "PdRpcClient::update_leader: ver_id: {:?}, leader: {:?}",
+            ver_id, leader
+        );
         self.region_cache.update_leader(ver_id, leader).await
     }
 
     async fn invalidate_region_cache(&self, ver_id: RegionVerId) {
+        debug!("PdRpcClient::invalidate_region_cache - ver_id {:?}", ver_id);
         self.region_cache.invalidate_region_cache(ver_id).await
     }
 
     async fn load_keyspace(&self, keyspace: &str) -> Result<keyspacepb::KeyspaceMeta> {
+        debug!("PdRpcClient::load_keyspace: {}", keyspace);
         self.pd.load_keyspace(keyspace).await
     }
 }
@@ -304,6 +322,7 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
         MakeKvC: FnOnce(Arc<SecurityManager>) -> KvC,
         MakePd: FnOnce(Arc<SecurityManager>) -> PdFut,
     {
+        debug!("PdRpcClient::new - New PdRpcClient: {:?}", config);
         let security_mgr = Arc::new(
             if let (Some(ca_path), Some(cert_path), Some(key_path)) =
                 (&config.ca_path, &config.cert_path, &config.key_path)
@@ -327,9 +346,16 @@ impl<KvC: KvConnect + Send + Sync + 'static, Cl> PdRpcClient<KvC, Cl> {
 
     async fn kv_client(&self, address: &str) -> Result<KvC::KvClient> {
         if let Some(client) = self.kv_client_cache.read().await.get(address) {
+            info!(
+                "PdRpcClient::kv_client - read cached client for: {}",
+                address
+            );
             return Ok(client.clone());
         };
-        info!("connect to tikv endpoint: {:?}", address);
+        info!(
+            "PdRpcClient::kv_client - connect to tikv endpoint: {}",
+            address
+        );
         match self.kv_connect.connect(address).await {
             Ok(client) => {
                 self.kv_client_cache

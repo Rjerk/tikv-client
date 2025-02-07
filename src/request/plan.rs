@@ -217,7 +217,8 @@ where
         preserve_region_results: bool,
         e: Error,
     ) -> Result<<Self as Plan>::Result> {
-        debug!("handle grpc error: {:?}", e);
+        debug!("handle grpc error: {}", e);
+
         let ver_id = region_store.region_with_leader.ver_id();
         pd_client.invalidate_region_cache(ver_id).await;
         match backoff.next_delay_duration() {
@@ -246,20 +247,28 @@ pub(crate) async fn handle_region_error<PdC: PdClient>(
     e: errorpb::Error,
     region_store: RegionStore,
 ) -> Result<bool> {
+    debug!("handle_region_error: {:?}", e);
     let ver_id = region_store.region_with_leader.ver_id();
     if let Some(not_leader) = e.not_leader {
+        debug!("handle_region_error: not leader");
         if let Some(leader) = not_leader.leader {
+            debug!("handle_region_error: not leader has leader");
             match pd_client
                 .update_leader(region_store.region_with_leader.ver_id(), leader)
                 .await
             {
                 Ok(_) => Ok(true),
                 Err(e) => {
+                    debug!(
+                        "handle_region_error: not leader update leader failed: {}",
+                        e
+                    );
                     pd_client.invalidate_region_cache(ver_id).await;
                     Err(e)
                 }
             }
         } else {
+            debug!("handle_region_error: peer has no leader, reload the region");
             // The peer doesn't know who is the current leader. Generally it's because
             // the Raft group is in an election, but it's possible that the peer is
             // isolated and removed from the Raft group. So it's necessary to reload
@@ -268,19 +277,24 @@ pub(crate) async fn handle_region_error<PdC: PdClient>(
             Ok(false)
         }
     } else if e.store_not_match.is_some() {
+        debug!("handle_region_error: store_not_match");
         pd_client.invalidate_region_cache(ver_id).await;
         Ok(false)
     } else if e.epoch_not_match.is_some() {
+        debug!("handle_region_error: epoch_not_match");
         on_region_epoch_not_match(pd_client.clone(), region_store, e.epoch_not_match.unwrap()).await
     } else if e.stale_command.is_some() || e.region_not_found.is_some() {
+        debug!("handle_region_error: stale_command or region_not_found");
         pd_client.invalidate_region_cache(ver_id).await;
         Ok(false)
     } else if e.server_is_busy.is_some()
         || e.raft_entry_too_large.is_some()
         || e.max_timestamp_not_synced.is_some()
     {
+        debug!("handle_region_error: server_is_busy or raft_entry_too_large or max_timestamp_not_synced");
         Err(Error::RegionError(Box::new(e)))
     } else {
+        debug!("handle_region_error: unknown error {:?}", e);
         // TODO: pass the logger around
         // info!("unknwon region error: {:?}", e);
         pd_client.invalidate_region_cache(ver_id).await;
@@ -780,6 +794,8 @@ where
 
     async fn execute(&self) -> Result<Self::Result> {
         let mut result = self.inner.execute().await?;
+        debug!("Result key_errors: {:?}", result.key_errors());
+        debug!("Result region_errors: {:?}", result.region_errors());
         if let Some(errors) = result.key_errors() {
             Err(Error::ExtractedErrors(errors))
         } else if let Some(errors) = result.region_errors() {
